@@ -181,198 +181,200 @@ class RobotLink:
 app = Flask(__name__)
 link = RobotLink()
 
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
+HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Viking MI 632 P - Управление</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background: #1a1a1a; color: #fff; font-family: Arial, sans-serif; }
-        .status-ready { background: #28a745; color: white; padding: 20px; border-radius: 10px; text-align: center; font-size: 24px; font-weight: bold; }
-        .status-safe { background: #dc3545; color: white; padding: 20px; border-radius: 10px; text-align: center; font-size: 24px; font-weight: bold; }
-        .sensor-box { background: #333; padding: 15px; border-radius: 8px; margin: 10px 0; }
-        .control-btn { margin: 5px; }
-        .speed-slider { width: 100%; }
-        .card { background: #2a2a2a; border: 1px solid #444; margin: 10px 0; }
-        .card-header { background: #333; color: #fff; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Viking MI 632 P - Управление</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { background: #131519; color: #e8eaed; font-family: 'Segoe UI', Arial, sans-serif; }
+.app { display: grid; grid-template-rows: auto 1fr auto; gap: 6px; height: 100vh; padding: 6px; }
+.topbar { display: flex; align-items: center; gap: 14px; background: #1c1f24; border: 1px solid #2a2e35; border-radius: 8px; padding: 8px 12px; }
+.brand { font-size: 20px; font-weight: 700; letter-spacing: 1px; white-space: nowrap; }
+.brand .hl { color: #4fc3f7; }
+#statusBox { flex: 1; }
+.status-ready, .status-safe { padding: 6px 14px; border-radius: 6px; font-weight: 700; font-size: 15px; letter-spacing: 1px; }
+.status-ready { background: #1b5e20; color: #b9f6ca; }
+.status-safe { background: #b71c1c; color: #ffcdd2; }
+.top-small { font-size: 14px; color: #90a4ae; white-space: nowrap; }
+.main { display: grid; grid-template-columns: 290px 1fr 350px; gap: 8px; min-height: 0; }
+.panel { background: #1c1f24; border: 1px solid #2a2e35; border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; }
+.panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #7c8794; border-bottom: 1px solid #2a2e35; padding-bottom: 4px; margin-bottom: 8px; }
+.tele-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; border-bottom: 1px dashed #282c33; }
+.tele-row .k { color: #9aa4af; }
+.tele-row .v { font-weight: 600; }
+.motor-block { margin-bottom: 10px; }
+.motor-head { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 2px; }
+.motor-head b { color: #4fc3f7; }
+.speed-slider { width: 100%; accent-color: #4fc3f7; height: 26px; cursor: pointer; }
+.stop-wrap { display: flex; gap: 8px; margin-top: 4px; }
+.btn-stop { flex: 1; background: #c62828; color: #fff; border: none; border-radius: 8px; font-size: 22px; font-weight: 800; padding: 12px; cursor: pointer; letter-spacing: 2px; }
+.btn-stop:hover { background: #b71c1c; }
+.aux-block { margin-bottom: 10px; }
+.btn-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.btn { border-radius: 6px; border: none; font-size: 14px; font-weight: 700; padding: 8px; cursor: pointer; }
+.btn-on { background: #1b5e20; color: #b9f6ca; }
+.btn-off { background: #b71c1c; color: #ffcdd2; }
+.btn-out { background: #1c1f24; border: 1px solid #4fc3f7; color: #4fc3f7; }
+.btn-out.active { background: #0d47a1; color: #fff; }
+.servo-row { margin-bottom: 8px; }
+.servo-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 2px; }
+.remotebar { background: #1c1f24; border: 1px solid #2a2e35; border-radius: 8px; padding: 6px 12px; display: flex; align-items: center; gap: 18px; font-size: 14px; }
+.remotebar .rot { font-size: 22px; font-weight: 800; color: #ffb74d; margin-left: 4px; }
+.remotebar .dim { color: #90a4ae; }
+</style>
 </head>
 <body>
-    <div class="container-fluid p-3">
-        <h2 class="text-center mb-4">🤖 Viking MI 632 P</h2>
-        
-        <div id="statusBox" class="mb-3">
-            <div class="status-ready" id="statusText">STATUS: READY</div>
-        </div>
-        
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">📊 Телеметрия</div>
-                    <div class="card-body">
-                        <div class="sensor-box">
-                            <strong> Батарея:</strong> <span id="battery">--</span> V
-                        </div>
-                        <div class="sensor-box">
-                            <strong>🚧 Бамперы:</strong> Перед: <span id="bumpFront">0</span> | Зад: <span id="bumpRear">0</span>
-                        </div>
-                        <div class="sensor-box">
-                            <strong> Наклон:</strong> Лев: <span id="tiltLeft">0</span> | Прав: <span id="tiltRight">0</span>
-                        </div>
-                        <div class="sensor-box">
-                            <strong>🕐 Время:</strong> <span id="clock">--:--</span>
-                        </div>
-                        <div class="sensor-box">
-                            <strong>️ Скорости:</strong> L: <span id="speedL">0</span> | R: <span id="speedR">0</span>
-                        </div>
-                        <div class="sensor-box">
-                            <strong>🔪 Нож:</strong> <span id="bladeStatus">OFF</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">🎮 Управление моторами</div>
-                    <div class="card-body">
-                        <label>Левый мотор: <span id="speedLVal">0</span></label>
-                        <input type="range" class="speed-slider" id="sliderL" min="-255" max="255" value="0" oninput="updateSpeed()">
-                        <label>Правый мотор: <span id="speedRVal">0</span></label>
-                        <input type="range" class="speed-slider" id="sliderR" min="-255" max="255" value="0" oninput="updateSpeed()">
-                        <button class="btn btn-danger w-100 mt-2" onclick="stopMotors()">🛑 СТОП</button>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <div class="card-header">🔪 Нож</div>
-                    <div class="card-body">
-                        <button class="btn btn-success w-100" onclick="bladeOn()">ВКЛ</button>
-                        <button class="btn btn-danger w-100 mt-2" onclick="bladeOff()">ВЫКЛ</button>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <div class="card-header"> Сервы</div>
-                    <div class="card-body">
-                        <label>Серва 1: <span id="servo1Val">90</span>°</label>
-                        <input type="range" class="speed-slider" id="servo1Slider" min="0" max="180" value="90" oninput="updateServo1()">
-                        <label>Серва 2: <span id="servo2Val">90</span>°</label>
-                        <input type="range" class="speed-slider" id="servo2Slider" min="0" max="180" value="90" oninput="updateServo2()">
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <div class="card-header">🔌 Реле</div>
-                    <div class="card-body">
-                        <button class="btn btn-outline-success control-btn" id="relay1Btn" onclick="toggleRelay1()">Реле 1: ВЫКЛ</button>
-                        <button class="btn btn-outline-success control-btn" id="relay2Btn" onclick="toggleRelay2()">Реле 2: ВЫКЛ</button>
-                    </div>
-                </div>
-            </div>
-        </div>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">🤖 Viking <span class="hl">MI 632 P</span></div>
+    <div id="statusBox"><div class="status-ready" id="statusText">STATUS: READY</div></div>
+    <div class="top-small" id="clockTop">🕐 <span id="clock">--:--</span></div>
+    <div class="top-small">🎮 Мост 1920x1080</div>
+  </div>
+  <div class="main">
+    <div class="panel">
+      <h3>📊 Телеметрия</h3>
+      <div class="tele-row"><span class="k">Батарея</span><span class="v" id="battery">--</span><span class="v">V</span></div>
+      <div class="tele-row"><span class="k">Бамперы</span><span class="v">Перед: <span id="bumpFront">0</span> · Зад: <span id="bumpRear">0</span></span></div>
+      <div class="tele-row"><span class="k">Наклон</span><span class="v">Лев: <span id="tiltLeft">0</span> · Прав: <span id="tiltRight">0</span></span></div>
+      <div class="tele-row"><span class="k">Скорости</span><span class="v">L: <span id="speedL">0</span> · R: <span id="speedR">0</span></span></div>
+      <div class="tele-row"><span class="k">Нож</span><span class="v" id="bladeStatus">OFF</span></div>
     </div>
-    
-    <div class="container mt-3 mb-4">
-        <div class="card">
-            <div class="card-header">Внешний пульт (D1 mini + энкодер)</div>
-            <div class="card-body">
-                <div style="font-size:42px;font-weight:bold;">ROT: <span id="remoteRot">0</span></div>
-                <div>Событие: <span id="remoteEvent">-</span> &nbsp; Нажатий: <span id="remoteClicks">0</span> &nbsp; <span id="remoteAge">пульт не на связи</span></div>
-            </div>
-        </div>
+    <div class="panel">
+      <h3>🎮 Управление моторами</h3>
+      <div class="motor-block">
+        <div class="motor-head"><span>Левый мотор</span><b id="speedLVal">0</b></div>
+        <input type="range" class="speed-slider" id="sliderL" min="-255" max="255" value="0" oninput="updateSpeed()">
+      </div>
+      <div class="motor-block">
+        <div class="motor-head"><span>Правый мотор</span><b id="speedRVal">0</b></div>
+        <input type="range" class="speed-slider" id="sliderR" min="-255" max="255" value="0" oninput="updateSpeed()">
+      </div>
+      <div class="stop-wrap">
+        <button class="btn-stop" onclick="stopMotors()">🛑 СТОП</button>
+      </div>
     </div>
-    <script>
-        let relay1State = false;
-        let relay2State = false;
-        
-        function updateSpeed() {
-            let l = document.getElementById('sliderL').value;
-            let r = document.getElementById('sliderR').value;
-            document.getElementById('speedLVal').innerText = l;
-            document.getElementById('speedRVal').innerText = r;
-            fetch('/api/drive?l=' + l + '&r=' + r);
-        }
-        
-        function stopMotors() {
-            document.getElementById('sliderL').value = 0;
-            document.getElementById('sliderR').value = 0;
-            document.getElementById('speedLVal').innerText = 0;
-            document.getElementById('speedRVal').innerText = 0;
-            fetch('/api/stop');
-        }
-        
-        function bladeOn() { fetch('/api/blade/on'); }
-        function bladeOff() { fetch('/api/blade/off'); }
-        
-        function updateServo1() {
-            let val = document.getElementById('servo1Slider').value;
-            document.getElementById('servo1Val').innerText = val;
-            fetch('/api/servo1?angle=' + val);
-        }
-        
-        function updateServo2() {
-            let val = document.getElementById('servo2Slider').value;
-            document.getElementById('servo2Val').innerText = val;
-            fetch('/api/servo2?angle=' + val);
-        }
-        
-        function toggleRelay1() {
-            relay1State = !relay1State;
-            document.getElementById('relay1Btn').innerText = 'Реле 1: ' + (relay1State ? 'ВКЛ' : 'ВЫКЛ');
-            document.getElementById('relay1Btn').className = 'btn control-btn ' + (relay1State ? 'btn-success' : 'btn-outline-success');
-            fetch('/api/relay1?on=' + relay1State);
-        }
-        
-        function toggleRelay2() {
-            relay2State = !relay2State;
-            document.getElementById('relay2Btn').innerText = 'Реле 2: ' + (relay2State ? 'ВКЛ' : 'ВЫКЛ');
-            document.getElementById('relay2Btn').className = 'btn control-btn ' + (relay2State ? 'btn-success' : 'btn-outline-success');
-            fetch('/api/relay2?on=' + relay2State);
-        }
-        
-        function updateStatus() {
-            fetch('/api/status')
-                .then(r => r.json())
-                .then(data => {
-                    let statusBox = document.getElementById('statusBox');
-                    let statusText = document.getElementById('statusText');
-                    if (data.system_safe) {
-                        statusBox.innerHTML = '<div class="status-ready">STATUS: READY</div>';
-                    } else {
-                        statusBox.innerHTML = '<div class="status-safe">STATUS: SAFE - ' + data.safe_reason + '</div>';
-                    }
-                    document.getElementById('battery').innerText = data.battery_v.toFixed(1);
-                    document.getElementById('bumpFront').innerText = data.bump_front ? '1' : '0';
-                    document.getElementById('bumpRear').innerText = data.bump_rear ? '1' : '0';
-                    document.getElementById('tiltLeft').innerText = data.tilt_left ? '1' : '0';
-                    document.getElementById('tiltRight').innerText = data.tilt_right ? '1' : '0';
-                    document.getElementById('clock').innerText = data.clock;
-                    document.getElementById('speedL').innerText = data.speed_l;
-                    document.getElementById('speedR').innerText = data.speed_r;
-                    document.getElementById('bladeStatus').innerText = data.blade_on ? 'ON' : 'OFF';
-                });
-        }
-        
-        setInterval(updateStatus, 1000);
-        function updateRemote() {
-            fetch('/remote/state').then(r => r.json()).then(d => {
-                document.getElementById('remoteRot').innerText = d.rot;
-                document.getElementById('remoteEvent').innerText = d.event;
-                document.getElementById('remoteClicks').innerText = d.clicks;
-                document.getElementById('remoteAge').innerText = d.age < 0 ? 'пульт ещё не отвечал' : ('обновлено ' + d.age.toFixed(1) + ' с назад');
-            }).catch(() => {});
-        }
-        setInterval(updateRemote, 500);
-        updateRemote();
-        updateStatus();
-    </script>
+    <div class="panel">
+      <div class="aux-block">
+        <h3>🔪 Нож</h3>
+        <div class="btn-pair">
+          <button class="btn btn-on" onclick="bladeOn()">ВКЛ</button>
+          <button class="btn btn-off" onclick="bladeOff()">ВЫКЛ</button>
+        </div>
+      </div>
+      <div class="aux-block">
+        <h3>🛠 Сервы</h3>
+        <div class="servo-row">
+          <div class="servo-head"><span>Серва 1</span><b id="servo1Val">90</b>°</div>
+          <input type="range" class="speed-slider" id="servo1Slider" min="0" max="180" value="90" oninput="updateServo1()">
+        </div>
+        <div class="servo-row">
+          <div class="servo-head"><span>Серва 2</span><b id="servo2Val">90</b>°</div>
+          <input type="range" class="speed-slider" id="servo2Slider" min="0" max="180" value="90" oninput="updateServo2()">
+        </div>
+      </div>
+      <div class="aux-block">
+        <h3>🔌 Реле</h3>
+        <div class="btn-pair">
+          <button class="btn btn-out" id="relay1Btn" onclick="toggleRelay1()">Реле 1: ВЫКЛ</button>
+          <button class="btn btn-out" id="relay2Btn" onclick="toggleRelay2()">Реле 2: ВЫКЛ</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="remotebar">
+    <span>Внешний пульт (D1 mini + энкодер)</span>
+    <span>ROT: <span class="rot" id="remoteRot">0</span></span>
+    <span class="dim">Событие: <span id="remoteEvent">-</span></span>
+    <span class="dim">Нажатий: <span id="remoteClicks">0</span></span>
+    <span class="dim" id="remoteAge">пульт не на связи</span>
+  </div>
+</div>
+<script>
+let relay1State = false;
+let relay2State = false;
+function updateSpeed() {
+  let l = document.getElementById('sliderL').value;
+  let r = document.getElementById('sliderR').value;
+  document.getElementById('speedLVal').innerText = l;
+  document.getElementById('speedRVal').innerText = r;
+  fetch('/api/drive?l=' + l + '&r=' + r);
+}
+function stopMotors() {
+  document.getElementById('sliderL').value = 0;
+  document.getElementById('sliderR').value = 0;
+  document.getElementById('speedLVal').innerText = 0;
+  document.getElementById('speedRVal').innerText = 0;
+  fetch('/api/stop');
+}
+function bladeOn() { fetch('/api/blade/on'); }
+function bladeOff() { fetch('/api/blade/off'); }
+function updateServo1() {
+  let val = document.getElementById('servo1Slider').value;
+  document.getElementById('servo1Val').innerText = val;
+  fetch('/api/servo1?angle=' + val);
+}
+function updateServo2() {
+  let val = document.getElementById('servo2Slider').value;
+  document.getElementById('servo2Val').innerText = val;
+  fetch('/api/servo2?angle=' + val);
+}
+function toggleRelay1() {
+  relay1State = !relay1State;
+  let b = document.getElementById('relay1Btn');
+  b.innerText = 'Реле 1: ' + (relay1State ? 'ВКЛ' : 'ВЫКЛ');
+  b.className = 'btn ' + (relay1State ? 'btn-out active' : 'btn-out');
+  fetch('/api/relay1?on=' + relay1State);
+}
+function toggleRelay2() {
+  relay2State = !relay2State;
+  let b = document.getElementById('relay2Btn');
+  b.innerText = 'Реле 2: ' + (relay2State ? 'ВКЛ' : 'ВЫКЛ');
+  b.className = 'btn ' + (relay2State ? 'btn-out active' : 'btn-out');
+  fetch('/api/relay2?on=' + relay2State);
+}
+function updateStatus() {
+  fetch('/api/status')
+  .then(r => r.json())
+  .then(data => {
+    let statusText = document.getElementById('statusText');
+    if (data.system_safe) {
+      statusText.className = 'status-ready';
+      statusText.textContent = 'STATUS: READY';
+    } else {
+      statusText.className = 'status-safe';
+      statusText.textContent = 'STATUS: SAFE - ' + data.safe_reason;
+    }
+    document.getElementById('battery').innerText = data.battery_v.toFixed(1);
+    document.getElementById('bumpFront').innerText = data.bump_front ? '1' : '0';
+    document.getElementById('bumpRear').innerText = data.bump_rear ? '1' : '0';
+    document.getElementById('tiltLeft').innerText = data.tilt_left ? '1' : '0';
+    document.getElementById('tiltRight').innerText = data.tilt_right ? '1' : '0';
+    document.getElementById('clock').innerText = data.clock;
+    document.getElementById('speedL').innerText = data.speed_l;
+    document.getElementById('speedR').innerText = data.speed_r;
+    document.getElementById('bladeStatus').innerText = data.blade_on ? 'ON' : 'OFF';
+  });
+}
+setInterval(updateStatus, 1000);
+function updateRemote() {
+  fetch('/remote/state').then(r => r.json()).then(d => {
+    document.getElementById('remoteRot').innerText = d.rot;
+    document.getElementById('remoteEvent').innerText = d.event;
+    document.getElementById('remoteClicks').innerText = d.clicks;
+    document.getElementById('remoteAge').innerText = d.age < 0 ? 'пульт ещё не отвечал' : ('обновлено ' + d.age.toFixed(1) + ' с назад');
+  }).catch(() => {});
+}
+setInterval(updateRemote, 500);
+updateRemote();
+updateStatus();
+</script>
 </body>
-</html>
-'''
+</html>'''
 
 @app.route('/')
 def index():
