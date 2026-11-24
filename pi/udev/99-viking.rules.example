@@ -1,0 +1,4 @@
+# Постоянные имена портов (оба устройства на CH340). Пример, не включён.
+# Узнать путь: udevadm info -a -n /dev/ttyUSB0 | grep KERNELS
+# SUBSYSTEM=="tty", KERNELS=="1-1", SYMLINK+="viking_mega"
+# SUBSYSTEM=="tty", KERNELS=="2-1", SYMLINK+="viking_remote"

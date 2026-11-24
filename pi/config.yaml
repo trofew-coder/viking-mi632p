@@ -1,0 +1,11 @@
+# Настройки Pi (заглушка). Локальные правки: config.local.yaml (в git не идёт).
+serial:
+  mega_port: /dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0-port0
+  baud: 115200
+heartbeat:
+  send_interval_s: 0.15
+  mega_timeout_ms: 300   # в старых заметках 1000, решить
+time_sync_interval_s: 60
+web:
+  host: 0.0.0.0
+  port: 5000

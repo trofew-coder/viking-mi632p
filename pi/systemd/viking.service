@@ -1,0 +1,11 @@
+[Unit]
+Description=Viking web control
+After=network.target
+
+[Service]
+User=igor
+ExecStart=/usr/bin/python3 /home/igor/web_control.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
