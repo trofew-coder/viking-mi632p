@@ -11,6 +11,7 @@ const int PIN_ML_PWM = 2, PIN_ML_DIR = 22, PIN_MR_PWM = 3, PIN_MR_DIR = 24;
 const int PIN_BLADE = 4, PIN_BUMP_F = 30, PIN_BUMP_R = 31;
 const int PIN_TILT_L = 32, PIN_TILT_R = 33, PIN_BATT = A0, PIN_LED_OK = 13;
 const int PIN_SERVO1 = 8, PIN_SERVO2 = 53;
+const int PIN_RELAY1 = 9, PIN_RELAY2 = 10;
 
 const unsigned long HEARTBEAT_TIMEOUT_MS = 300;
 const unsigned long SENSORS_REPORT_MS = 200;
@@ -41,8 +42,8 @@ void setMotorRight(int speed) {
   analogWrite(PIN_MR_PWM, abs(speed));
 }
 void setBlade(bool on) { bladeOn = on; digitalWrite(PIN_BLADE, on ? HIGH : LOW); }
-void setRelay1(bool on) { digitalWrite(PIN_SERVO1, on ? HIGH : LOW); }
-void setRelay2(bool on) { digitalWrite(PIN_SERVO2, on ? HIGH : LOW); }
+void setRelay1(bool on) { digitalWrite(PIN_RELAY1, on ? HIGH : LOW); }
+void setRelay2(bool on) { digitalWrite(PIN_RELAY2, on ? HIGH : LOW); }
 
 void emergencyStop(const char* reason) {
   setMotorLeft(0); setMotorRight(0); setBlade(false);
@@ -185,7 +186,7 @@ void setup() {
   pinMode(PIN_BLADE, OUTPUT); pinMode(PIN_BUMP_F, INPUT_PULLUP);
   pinMode(PIN_BUMP_R, INPUT_PULLUP); pinMode(PIN_TILT_L, INPUT_PULLUP);
   pinMode(PIN_TILT_R, INPUT_PULLUP); pinMode(PIN_BATT, INPUT);
-  pinMode(PIN_LED_OK, OUTPUT); pinMode(PIN_SERVO1, OUTPUT); pinMode(PIN_SERVO2, OUTPUT);
+  pinMode(PIN_LED_OK, OUTPUT); pinMode(PIN_RELAY1, OUTPUT); pinMode(PIN_RELAY2, OUTPUT);
   servo1.attach(PIN_SERVO1); servo2.attach(PIN_SERVO2);
   servo1.write(90); servo2.write(90);
   hardStop();
