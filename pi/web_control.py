@@ -4,8 +4,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Callable
 from flask import Flask, render_template_string, jsonify, request
 
-# Порт по by-path — стабилен (не ttyUSB0, который может меняться)
-# ttyUSB1 = Uno как USB-UART мост от Mega Serial3 (пины 14/15)
+# Порт — PL2303 USB-UART адаптер к Mega Serial3 (пины 14 TX3 / 15 RX3)
 SERIAL_PORT = "/dev/ttyUSB1"
 BAUD_RATE = 115200
 HEARTBEAT_INTERVAL_S = 0.15
