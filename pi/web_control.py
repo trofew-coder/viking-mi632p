@@ -151,10 +151,11 @@ class RobotLink:
                 time.sleep(RECONNECT_DELAY_S)
                 continue
             try:
+                # Читаем чанками с маленьким таймаутом — не блокировать HB
                 if self.serial.in_waiting > 0:
-                    raw = self.serial.readline()
-                    if raw:
-                        line = raw.decode("utf-8", errors="ignore").strip()
+                    raw = self.serial.read(self.serial.in_waiting)
+                    text = raw.decode("utf-8", errors="ignore").strip()
+                    for line in text.split('\n'):
                         if line: self._parse_line(line)
                 else: time.sleep(0.01)
             except serial.SerialException:
