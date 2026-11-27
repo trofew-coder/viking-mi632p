@@ -4,12 +4,16 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Callable
 from flask import Flask, render_template_string, jsonify, request
 
-SERIAL_PORT = "/dev/ttyUSB0"
+# Порт по by-path — стабилен (не ttyUSB0, который может меняться)
+SERIAL_PORT = "/dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0-port0"
 BAUD_RATE = 115200
 HEARTBEAT_INTERVAL_S = 0.15
 RECONNECT_DELAY_S = 1.0
 TIME_SYNC_INTERVAL_S = 60
 TIMEZONE_OFFSET_HOURS = 3
+
+# FIX: DS_DTR=False чтобы тесты не перезагружали Mega (CH340 дергает DTR)
+SERIAL_INIT_DELAY_S = 2.2  # задержка после открытия Serial для загрузчика Arduino
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("RobotLink")
@@ -49,8 +53,14 @@ class RobotLink:
 
     def connect(self) -> bool:
         try:
-            self.serial = serial.Serial(port=self.port, baudrate=self.baud, timeout=0.1, write_timeout=0.5)
-            time.sleep(2.0)
+            # dsrdtr=False — не сбрасывать Mega при открытии порта (CH340 DTR reset)
+            self.serial = serial.Serial(
+                port=self.port, baudrate=self.baud, timeout=0.1, write_timeout=0.5,
+                dsrdtr=False
+            )
+            # Задержка для CH340/Arduino: при открытии порта DTR reset → Mega перезагружается
+            # Первые 2 секунды загрузчик глушит UART, нужно ждать
+            time.sleep(SERIAL_INIT_DELAY_S)
             self.serial.reset_input_buffer()
             log.info(f"Serial открыт: {self.port} @ {self.baud}")
             return True
