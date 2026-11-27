@@ -6,8 +6,8 @@ from flask import Flask, render_template_string, jsonify, request
 
 # Порт — PL2303 USB-UART адаптер к Mega Serial3 (пины 14 TX3 / 15 RX3)
 SERIAL_PORT = "/dev/ttyUSB1"
-BAUD_RATE = 115200
-HEARTBEAT_INTERVAL_S = 0.15
+BAUD_RATE = 9600 # PL2303 на 115200 теряет пакеты
+HEARTBEAT_INTERVAL_S = 1.0 # PL2303 не успевает на 0.15s
 RECONNECT_DELAY_S = 1.0
 TIME_SYNC_INTERVAL_S = 60
 TIMEZONE_OFFSET_HOURS = 3

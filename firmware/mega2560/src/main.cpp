@@ -271,7 +271,7 @@ void setup() {
 
   // UART — Serial3 на пинах 14(TX3) / 15(RX3)
   // ВНИМАНИЕ: Serial (пины 0/1) неисправен — RX0 выгорел
-  Serial3.begin(115200);
+  Serial3.begin(9600); // PL2303 не справляется с 115200
   lastHB = millis();
   Serial3.println("ACK;BOOT BLDC");
 
