@@ -1,10 +1,15 @@
 // firmware/mega2560/src/main.cpp
-// BLDC ESC via Timer1 direct, сервы через micros()
+// Протокол v3: $CMD;ARGS*CS\n (XOR-контрольная сумма)
 // От 27.11.2026:
 // - Чистые C-строки для rxBuffer, без String fragmentation
 // - Пины 11/12 (Timer1) для ESC, 5/4 (Timer2) для серв, 47/48/49 для реле/ножа
 // - UART для связи с Pi через Serial3 (пины 14 TX3 / 15 RX3)
 //   ВНИМАНИЕ: аппаратный Serial (пины 0/1) неисправен на текущем клоне Mega!
+// - Формат кадра: $CMD;ARGS*CS\n
+//   $ — стартовый маркер
+//   CMD;ARGS — команда с аргументами
+//   *CS — разделитель XOR-контрольной суммы
+//   CS — XOR всех байтов между $ и * (2 hex-символа)
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -25,7 +30,7 @@ const int PIN_BUMP_F = 30, PIN_BUMP_R = 31;
 const int PIN_TILT_L = 32, PIN_TILT_R = 33;
 const int PIN_BATT   = A0, PIN_LED_OK = 13;
 
-const unsigned long HEARTBEAT_TIMEOUT_MS = 5000; // 5s — Python GIL может задержать HB
+const unsigned long HEARTBEAT_TIMEOUT_MS = 2000; // 2s — с запасом поверх 250ms HB
 const unsigned long SENSORS_REPORT_MS    = 5000; // 5s — не блокировать UART
 const int BATT_DIV_RATIO = 11;
 
@@ -153,7 +158,29 @@ void updateLcd() {
   else { lcd.print("HB OK  TILT:"); lcd.print(digitalRead(PIN_TILT_L) ? '0' : '1'); lcd.print(digitalRead(PIN_TILT_R) ? '0' : '1'); lcd.print("  "); }
 }
 
-// --- Парсер команд (чистые C-строки, без String) ---
+// --- XOR-контрольная сумма: XOR всех байтов между $ и * ---
+uint8_t xorChecksum(const char* s, uint8_t len) {
+  uint8_t cs = 0;
+  for (uint8_t i = 0; i < len; i++) cs ^= (uint8_t)s[i];
+  return cs;
+}
+
+// Парсить 2 hex-символа -> число
+uint8_t parseHex2(const char* s) {
+  uint8_t val = 0;
+  for (uint8_t i = 0; i < 2; i++) {
+    val <<= 4;
+    char c = s[i];
+    if (c >= '0' && c <= '9') val |= (c - '0');
+    else if (c >= 'a' && c <= 'f') val |= (c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') val |= (c - 'A' + 10);
+  }
+  return val;
+}
+
+// --- Протокол v3: $CMD;ARGS*CS\n ---
+// $ — стартовый маркер (игнор мусора)
+// CS — XOR всех байтов между $ и *
 void processCommand(const char* cmd) {
   if (cmd[0] == '\0') return;
   lastHB = millis();
@@ -161,66 +188,81 @@ void processCommand(const char* cmd) {
 
   char cmdCopy[64];
   strncpy(cmdCopy, cmd, 63); cmdCopy[63] = '\0';
-  char* semicolon = strchr(cmdCopy, ';');
+  char* star = strchr(cmdCopy, '*');
   char* cmdType = cmdCopy;
 
-  if (semicolon) {
-    *semicolon = '\0';
-    char* args = semicolon + 1;
-
-    if (strcmp(cmdType, "DRV") == 0) {
-      char* s2 = strchr(args, ';');
-      if (!s2) { Serial3.println("ERR;DRV_FORMAT"); return; }
-      *s2 = '\0'; setMotors(atoi(args), atoi(s2 + 1)); Serial3.println("ACK;DRV");
-    } else if (strcmp(cmdType, "ESC") == 0) {
-      char* s2 = strchr(args, ';');
-      if (!s2) { Serial3.println("ERR;ESC_FORMAT"); return; }
-      *s2 = '\0'; setESCLeft(atoi(args)); setESCRight(atoi(s2 + 1));
-      Serial3.print("ACK;ESC;"); Serial3.print(atoi(args)); Serial3.print(";"); Serial3.println(atoi(s2 + 1));
-    } else if (strcmp(cmdType, "BLD") == 0) {
-      setBlade(atoi(args) != 0); Serial3.println("ACK;BLD");
-    } else if (strcmp(cmdType, "HB") == 0) {
-      if (!systemSafe) systemSafe = true;
-      Serial3.println("ACK;HB");
-    } else if (strcmp(cmdType, "S1") == 0) {
-      int a = constrain(atoi(args), 0, 180);
-      servoAngle1 = a;
-      servo1TargetUs = SERVO_MIN_US + (int)((float)a / 180.0 * (SERVO_MAX_US - SERVO_MIN_US));
-      Serial3.print("ACK;S1;"); Serial3.println(a);
-    } else if (strcmp(cmdType, "S2") == 0) {
-      int a = constrain(atoi(args), 0, 180);
-      servoAngle2 = a;
-      servo2TargetUs = SERVO_MIN_US + (int)((float)a / 180.0 * (SERVO_MAX_US - SERVO_MIN_US));
-      Serial3.print("ACK;S2;"); Serial3.println(a);
-    } else if (strcmp(cmdType, "R1") == 0) {
-      setRelay1(atoi(args) != 0);
-      Serial3.print("ACK;R1;"); Serial3.println(atoi(args));
-    } else if (strcmp(cmdType, "R2") == 0) {
-      setRelay2(atoi(args) != 0);
-      Serial3.print("ACK;R2;"); Serial3.println(atoi(args));
-    } else if (strcmp(cmdType, "TIME") == 0) {
-      char* i1 = strchr(args, ';');
-      if (i1) {
-        *i1 = '\0'; clockH = atoi(args); clockM = atoi(i1 + 1); clockLastSync = millis();
-        char timeBuf[6];
-        snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", clockH, clockM);
-        Serial3.print("ACK;TIME;"); Serial3.println(timeBuf);
-      } else { Serial3.println("ERR;TIME_FORMAT"); }
-    } else if (strcmp(cmdType, "ROT") == 0) {
-      remoteRot = atol(args); lastLCD = 0;
-    } else if (strcmp(cmdType, "BTN") == 0) {
-      remoteEvt = 'C'; remoteEvtAt = millis(); lastLCD = 0;
-    } else if (strcmp(cmdType, "RST") == 0) {
-      remoteRot = 0; remoteEvt = 'Z'; remoteEvtAt = millis(); lastLCD = 0;
-    } else {
-      Serial3.print("ERR;UNKNOWN_CMD:"); Serial3.println(cmdType);
+  if (star) {
+    // Разделить по * — перед * — команда, после * — контрольная сумма
+    *star = '\0';
+    char* csStr = star + 1;
+    if (strlen(csStr) >= 2) {
+      uint8_t expectedCS = parseHex2(csStr);
+      // Посчитать реальную XOR всех байтов до *
+      uint8_t realCS = xorChecksum(cmdCopy, strlen(cmdCopy));
+      if (realCS != expectedCS) {
+        // Контрольная сумма не совпала — отбросить пакет
+        return;
+      }
     }
-  } else {
-    if (strcmp(cmdType, "HB") == 0) {
-      if (!systemSafe) systemSafe = true;
-      Serial3.println("ACK;HB");
+    char* semicolon = strchr(cmdCopy, ';');
+    if (semicolon) {
+      *semicolon = '\0';
+      char* args = semicolon + 1;
+      if (strcmp(cmdType, "DRV") == 0) {
+        char* s2 = strchr(args, ';');
+        if (!s2) { Serial3.println("ERR;DRV_FORMAT"); return; }
+        *s2 = '\0'; setMotors(atoi(args), atoi(s2 + 1)); Serial3.println("ACK;DRV");
+      } else if (strcmp(cmdType, "ESC") == 0) {
+        char* s2 = strchr(args, ';');
+        if (!s2) { Serial3.println("ERR;ESC_FORMAT"); return; }
+        *s2 = '\0'; setESCLeft(atoi(args)); setESCRight(atoi(s2 + 1));
+        Serial3.print("ACK;ESC;"); Serial3.print(atoi(args)); Serial3.print(";"); Serial3.println(atoi(s2 + 1));
+      } else if (strcmp(cmdType, "BLD") == 0) {
+        setBlade(atoi(args) != 0); Serial3.println("ACK;BLD");
+      } else if (strcmp(cmdType, "HB") == 0) {
+        if (!systemSafe) systemSafe = true;
+        Serial3.println("ACK;HB");
+      } else if (strcmp(cmdType, "S1") == 0) {
+        int a = constrain(atoi(args), 0, 180);
+        servoAngle1 = a;
+        servo1TargetUs = SERVO_MIN_US + (int)((float)a / 180.0 * (SERVO_MAX_US - SERVO_MIN_US));
+        Serial3.print("ACK;S1;"); Serial3.println(a);
+      } else if (strcmp(cmdType, "S2") == 0) {
+        int a = constrain(atoi(args), 0, 180);
+        servoAngle2 = a;
+        servo2TargetUs = SERVO_MIN_US + (int)((float)a / 180.0 * (SERVO_MAX_US - SERVO_MIN_US));
+        Serial3.print("ACK;S2;"); Serial3.println(a);
+      } else if (strcmp(cmdType, "R1") == 0) {
+        setRelay1(atoi(args) != 0);
+        Serial3.print("ACK;R1;"); Serial3.println(atoi(args));
+      } else if (strcmp(cmdType, "R2") == 0) {
+        setRelay2(atoi(args) != 0);
+        Serial3.print("ACK;R2;"); Serial3.println(atoi(args));
+      } else if (strcmp(cmdType, "TIME") == 0) {
+        char* i1 = strchr(args, ';');
+        if (i1) {
+          *i1 = '\0'; clockH = atoi(args); clockM = atoi(i1 + 1); clockLastSync = millis();
+          char timeBuf[6];
+          snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", clockH, clockM);
+          Serial3.print("ACK;TIME;"); Serial3.println(timeBuf);
+        } else { Serial3.println("ERR;TIME_FORMAT"); }
+      } else if (strcmp(cmdType, "ROT") == 0) {
+        remoteRot = atol(args); lastLCD = 0;
+      } else if (strcmp(cmdType, "BTN") == 0) {
+        remoteEvt = 'C'; remoteEvtAt = millis(); lastLCD = 0;
+      } else if (strcmp(cmdType, "RST") == 0) {
+        remoteRot = 0; remoteEvt = 'Z'; remoteEvtAt = millis(); lastLCD = 0;
+      } else {
+        Serial3.print("ERR;UNKNOWN_CMD:"); Serial3.println(cmdType);
+      }
     } else {
-      Serial3.print("ERR;UNKNOWN_CMD:"); Serial3.println(cmdType);
+      // Команда без аргументов ($HB)
+      if (strcmp(cmdType, "HB") == 0) {
+        if (!systemSafe) systemSafe = true;
+        Serial3.println("ACK;HB");
+      } else {
+        Serial3.print("ERR;UNKNOWN_CMD:"); Serial3.println(cmdType);
+      }
     }
   }
 }
@@ -271,7 +313,7 @@ void setup() {
 
   // UART — Serial3 на пинах 14(TX3) / 15(RX3)
   // ВНИМАНИЕ: Serial (пины 0/1) неисправен — RX0 выгорел
-  Serial3.begin(57600); // PL2303 компромисс между 115200 и 9600
+  Serial3.begin(115200);
   lastHB = millis();
   Serial3.println("ACK;BOOT BLDC");
 
@@ -282,16 +324,21 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Чтение UART — Serial3 (пины 14/15), БЕЗ String
+  // Чтение UART — Serial3 (пины 14/15), протокол v3: $CMD;ARGS*CS\n
+  // Игнорим пакеты без $ — мусор на линии
   while (Serial3.available()) {
     char c = (char)Serial3.read();
     if (c == '\n') {
       if (rxLen > 0 && rxBuf[rxLen - 1] == '\r') rxBuf[--rxLen] = '\0';
-      processCommand(rxBuf);
+      // Только если начинается с $ — иначе игнор (мусор/наводки)
+      if (rxLen > 0 && rxBuf[0] == '$') processCommand(rxBuf);
       rxLen = 0;
+    } else if (c == '$') {
+      // Новый пакет — сбросить старый и начать с $
+      rxLen = 0; rxBuf[rxLen++] = c;
     } else {
       if (rxLen < 63) { rxBuf[rxLen++] = c; rxBuf[rxLen] = '\0'; }
-      else { rxLen = 0; }
+      else { rxLen = 0; } // Переполнение — сброс
     }
   }
 

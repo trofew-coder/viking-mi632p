@@ -39,7 +39,10 @@
 |---|---|---|---|
 | LCD 2004A I2C (SDA) | 20 | TWI/I2C | Адрес 0x27 |
 | LCD 2004A I2C (SCL) | 21 | TWI/I2C | Адрес 0x27 |
-| UART (Pi ↔ Mega) | 14(TX3) / 15(RX3) | SERIAL3 | 115200 baud |
+| UART (Pi ↔ Mega) | Pi GPIO14(TX) / GPIO15(RX) | SER0 | 115200 baud, `/dev/ttyAMA0` |
+| Mega TX3 (5В) → Pi | Пин 14 (TX3) | 5В UART | → делитель 1к+2к → Pi GPIO15 (RX, 3.3В) |
+| Pi TX (3.3В) → Mega | Pi GPIO14 (TX) | 3.3В UART | → Mega RX3 (пин 15, безопасно) |
+| GND | — | — | Общая земля Pi + Mega |
 | **UART (резерв)** | 0(RX)/1(TX) | SERIAL | ⚠️ **Неисправен!** RX0 выгорел |
 
 ## D1 mini (пульт)

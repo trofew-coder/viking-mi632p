@@ -4,13 +4,21 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Callable
 from flask import Flask, render_template_string, jsonify, request
 
-# Порт — PL2303 USB-UART адаптер к Mega Serial3 (пины 14 TX3 / 15 RX3)
-SERIAL_PORT = "/dev/ttyUSB1"
+# Порт — прямой аппаратный UART Pi (GPIO 14 TX / GPIO 15 RX)
+# Mega TX3 (5В) → делитель 1к+2к → Pi GPIO15 (RX, 3.3В)
+SERIAL_PORT = "/dev/ttyAMA0"
 BAUD_RATE = 115200
-HEARTBEAT_INTERVAL_S = 0.25 # 250ms — подстраховать даже при задержках Python
+HEARTBEAT_INTERVAL_S = 0.25 # 250ms — приоритет HB
 RECONNECT_DELAY_S = 1.0
 TIME_SYNC_INTERVAL_S = 60
 TIMEZONE_OFFSET_HOURS = 3
+
+def _xor_checksum(text: str) -> str:
+    """XOR всех байтов строки, вернуть 2 hex-символа"""
+    cs = 0
+    for b in text.encode('utf-8'):
+        cs ^= b
+    return format(cs, '02X')
 
 # FIX: DS_DTR=False чтобы тесты не перезагружали Mega (CH340 дергает DTR)
 SERIAL_INIT_DELAY_S = 2.2  # задержка после открытия Serial для загрузчика Arduino
@@ -85,9 +93,11 @@ class RobotLink:
         return False
 
     def _send_raw(self, line: str) -> bool:
+        """Отправить команду в протоколе v3: $CMD*CS\n"""
         if not self._ensure_connected(): return False
         try:
-            self.serial.write((line + "\n").encode("utf-8"))
+            frame = f"${line}*{_xor_checksum(line)}\n"
+            self.serial.write(frame.encode("utf-8"))
             return True
         except serial.SerialException as e:
             log.error(f"Ошибка записи: {e}")
