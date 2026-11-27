@@ -1,5 +1,26 @@
 # Журнал работ
 
+## 2026-11-27 — Протокол v3: $CMD*CS XOR, UART /dev/ttyAMA0
+
+### Изменения
+- **PROTOCOL.md**: формат кадра `$CMD;ARGS*CS\n` с XOR-контрольной суммой, протокол v3.
+- **firmware/mega2560/src/main.cpp**: парсер `$CMD*CS`, проверка XOR, игнор мусора, HB_TIMEOUT = 2000ms, SENS 5000ms, 115200 baud.
+- **pi/web_control.py**: порт `/dev/ttyAMA0`, функция `_xor_checksum()`, HB каждые 250ms.
+- **docs/PINOUT.md**: UART на GPIO 14/15 + делитель 1к+2к (Mega TX3 5В → Pi RX 3.3В).
+- **docs/PROTOCOL.md**: обновлён до v3, добавлен формат `$CMD*CS`.
+- **docs/TEAM_LOG.md**: первая запись о переходе на протокол v3.
+
+### Убрано
+- PL2303 USB-UART мост — заменён на прямой `/dev/ttyAMA0`.
+- `firmware/uno/` — порт под Uno больше не нужен (прямой UART).
+
+### Требуется на Pi
+- Отключить Bluetooth: `dtoverlay=disable-bt` в `/boot/config.txt`
+- `sudo systemctl stop serial-getty@serial.service`
+- Подключить делитель 1к+2к между Pi GPIO14/15 и Mega Serial3 (пины 14/15).
+
+---
+
 ## 2026-11-24 — Сборка и прошивка Mega 2560
 
 - Локальная прошивка `firmware/mega2560` собрана PlatformIO для `megaatmega2560`.
