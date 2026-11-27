@@ -25,7 +25,7 @@ const int PIN_BUMP_F = 30, PIN_BUMP_R = 31;
 const int PIN_TILT_L = 32, PIN_TILT_R = 33;
 const int PIN_BATT   = A0, PIN_LED_OK = 13;
 
-const unsigned long HEARTBEAT_TIMEOUT_MS = 1000;
+const unsigned long HEARTBEAT_TIMEOUT_MS = 2500; // 2.5s — с запасом поверх 250ms HB
 const unsigned long SENSORS_REPORT_MS    = 3000; // PL2303 мост занят
 const int BATT_DIV_RATIO = 11;
 

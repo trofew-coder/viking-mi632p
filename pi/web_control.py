@@ -6,8 +6,8 @@ from flask import Flask, render_template_string, jsonify, request
 
 # Порт — PL2303 USB-UART адаптер к Mega Serial3 (пины 14 TX3 / 15 RX3)
 SERIAL_PORT = "/dev/ttyUSB1"
-BAUD_RATE = 57600 # PL2303 115200 мусорит, 9600 не работает — 57600 компромисс
-HEARTBEAT_INTERVAL_S = 1.0 # PL2303 не успевает на 0.15s
+BAUD_RATE = 115200
+HEARTBEAT_INTERVAL_S = 0.25 # 250ms — подстраховать даже при задержках Python
 RECONNECT_DELAY_S = 1.0
 TIME_SYNC_INTERVAL_S = 60
 TIMEZONE_OFFSET_HOURS = 3
@@ -55,7 +55,7 @@ class RobotLink:
         try:
             # dsrdtr=False — не сбрасывать Mega при открытии порта (CH340 DTR reset)
             self.serial = serial.Serial(
-                port=self.port, baudrate=self.baud, timeout=0.1, write_timeout=0.5,
+                port=self.port, baudrate=self.baud, timeout=0.05, write_timeout=0.1,
                 dsrdtr=False
             )
             # Задержка для CH340/Arduino: при открытии порта DTR reset → Mega перезагружается
@@ -85,15 +85,15 @@ class RobotLink:
         return False
 
     def _send_raw(self, line: str) -> bool:
-        with self._lock:
-            if not self._ensure_connected(): return False
-            try:
-                self.serial.write((line + "\n").encode("utf-8"))
-                return True
-            except serial.SerialException as e:
-                log.error(f"Ошибка записи: {e}")
-                self.serial.close()
-                return False
+        if not self._ensure_connected(): return False
+        try:
+            self.serial.write((line + "\n").encode("utf-8"))
+            return True
+        except serial.SerialException as e:
+            log.error(f"Ошибка записи: {e}")
+            try: self.serial.close()
+            except Exception: pass
+            return False
 
     def drive(self, speed_left: int, speed_right: int) -> bool:
         self.current_speed_l = speed_left
