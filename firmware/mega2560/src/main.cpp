@@ -1,6 +1,11 @@
 // firmware/mega2560/src/main.cpp
-// BLDC ESC via Timer1 direct (no Servo lib), сервы через micros()
-// От 27.11.2026: чистые C-строки для rxBuffer, без String fragmentation
+// BLDC ESC via Timer1 direct, сервы через micros()
+// От 27.11.2026:
+// - Чистые C-строки для rxBuffer, без String fragmentation
+// - Пины 11/12 (Timer1) для ESC, 5/4 (Timer2) для серв, 47/48/49 для реле/ножа
+// - UART для связи с Pi через Serial3 (пины 14 TX3 / 15 RX3)
+//   ВНИМАНИЕ: аппаратный Serial (пины 0/1) неисправен на текущем клоне Mega!
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -46,7 +51,8 @@ unsigned long lastHB = 0, lastSR = 0, lastLCD = 0;
 bool systemSafe = true;
 int16_t speedL = 0, speedR = 0;
 bool _bladeOn = false;
-String safeReason = "";
+// safeReason — char array вместо String (меньше heap fragmentation)
+char safeReason[32];
 int clockH = 0, clockM = 0;
 unsigned long clockLastSync = 0;
 
@@ -93,11 +99,10 @@ void setRelay2(bool on) { digitalWrite(PIN_RELAY2, on ? HIGH : LOW); }
 void emergencyStop(const char* reason) {
   setMotors(0, 0); setBlade(false); setRelay1(false); setRelay2(false);
   setESCLeft(ESC_NEUTRAL); setESCRight(ESC_NEUTRAL);
-  systemSafe = false; safeReason = String(reason);
-  Serial.print("SAFE;"); Serial.println(reason);
+  systemSafe = false;
+  strncpy(safeReason, reason, 31); safeReason[31] = '\0';
+  Serial3.print("SAFE;"); Serial3.println(reason);
 }
-
-String pad2(int v) { if (v < 10) return "0" + String(v); return String(v); }
 
 // --- Часы ---
 void tickClock() {
@@ -121,17 +126,18 @@ void updateServos() {
   digitalWrite(PIN_SERVO2, (now - servo2PulseStart < (unsigned long)us2) ? HIGH : LOW);
 }
 
-// --- LCD ---
+// --- LCD (snprintf, без String) ---
 void updateLcd() {
   tickClock();
   lcd.setCursor(0, 0);
   {
-    String st = systemSafe ? F("STATUS: READY") : F("STATUS: SAFE ");
+    const char* st = systemSafe ? "STATUS: READY" : "STATUS: SAFE ";
     char e = (millis() - remoteEvtAt < 1500UL) ? remoteEvt : 'R';
-    String rs = String(e) + ":" + String(remoteRot);
-    while (rs.length() < 6) rs += " ";
-    if (rs.length() > 6) rs = rs.substring(0, 6);
-    lcd.print(st + " " + rs);
+    char rs[16];
+    snprintf(rs, sizeof(rs), "%c%ld", e, (long)remoteRot);
+    // Ограничить до 6 символов
+    if (strlen(rs) > 6) rs[6] = '\0';
+    lcd.print(st); lcd.print(" "); lcd.print(rs);
   }
   long batt_mv = (long)analogRead(PIN_BATT) * 5000L / 1023L * BATT_DIV_RATIO;
   lcd.setCursor(0, 1);
@@ -139,10 +145,12 @@ void updateLcd() {
   lcd.print(_bladeOn ? "BLD:ON " : "BLD:OFF"); lcd.print("    ");
   lcd.setCursor(0, 2);
   lcd.print("L:"); lcd.print(speedL); lcd.print(" R:"); lcd.print(speedR); lcd.print("  ");
-  lcd.print(pad2(clockH) + ":" + pad2(clockM)); lcd.print("   ");
+  char timeBuf[6];
+  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", clockH, clockM);
+  lcd.print(timeBuf); lcd.print("   ");
   lcd.setCursor(0, 3);
   if (!systemSafe) { lcd.print("! "); lcd.print(safeReason); lcd.print("          "); }
-  else { lcd.print("HB OK  TILT:"); lcd.print(digitalRead(PIN_TILT_L) ? "0" : "1"); lcd.print(digitalRead(PIN_TILT_R) ? "0" : "1"); lcd.print("  "); }
+  else { lcd.print("HB OK  TILT:"); lcd.print(digitalRead(PIN_TILT_L) ? '0' : '1'); lcd.print(digitalRead(PIN_TILT_R) ? '0' : '1'); lcd.print("  "); }
 }
 
 // --- Парсер команд (чистые C-строки, без String) ---
@@ -162,40 +170,42 @@ void processCommand(const char* cmd) {
 
     if (strcmp(cmdType, "DRV") == 0) {
       char* s2 = strchr(args, ';');
-      if (!s2) { Serial.println("ERR;DRV_FORMAT"); return; }
-      *s2 = '\0'; setMotors(atoi(args), atoi(s2 + 1)); Serial.println("ACK;DRV");
+      if (!s2) { Serial3.println("ERR;DRV_FORMAT"); return; }
+      *s2 = '\0'; setMotors(atoi(args), atoi(s2 + 1)); Serial3.println("ACK;DRV");
     } else if (strcmp(cmdType, "ESC") == 0) {
       char* s2 = strchr(args, ';');
-      if (!s2) { Serial.println("ERR;ESC_FORMAT"); return; }
+      if (!s2) { Serial3.println("ERR;ESC_FORMAT"); return; }
       *s2 = '\0'; setESCLeft(atoi(args)); setESCRight(atoi(s2 + 1));
-      Serial.print("ACK;ESC;"); Serial.print(atoi(args)); Serial.print(";"); Serial.println(atoi(s2 + 1));
+      Serial3.print("ACK;ESC;"); Serial3.print(atoi(args)); Serial3.print(";"); Serial3.println(atoi(s2 + 1));
     } else if (strcmp(cmdType, "BLD") == 0) {
-      setBlade(atoi(args) != 0); Serial.println("ACK;BLD");
+      setBlade(atoi(args) != 0); Serial3.println("ACK;BLD");
     } else if (strcmp(cmdType, "HB") == 0) {
       if (!systemSafe) systemSafe = true;
-      Serial.println("ACK;HB");
+      Serial3.println("ACK;HB");
     } else if (strcmp(cmdType, "S1") == 0) {
       int a = constrain(atoi(args), 0, 180);
       servoAngle1 = a;
       servo1TargetUs = SERVO_MIN_US + (int)((float)a / 180.0 * (SERVO_MAX_US - SERVO_MIN_US));
-      Serial.print("ACK;S1;"); Serial.println(a);
+      Serial3.print("ACK;S1;"); Serial3.println(a);
     } else if (strcmp(cmdType, "S2") == 0) {
       int a = constrain(atoi(args), 0, 180);
       servoAngle2 = a;
       servo2TargetUs = SERVO_MIN_US + (int)((float)a / 180.0 * (SERVO_MAX_US - SERVO_MIN_US));
-      Serial.print("ACK;S2;"); Serial.println(a);
+      Serial3.print("ACK;S2;"); Serial3.println(a);
     } else if (strcmp(cmdType, "R1") == 0) {
       setRelay1(atoi(args) != 0);
-      Serial.print("ACK;R1;"); Serial.println(atoi(args));
+      Serial3.print("ACK;R1;"); Serial3.println(atoi(args));
     } else if (strcmp(cmdType, "R2") == 0) {
       setRelay2(atoi(args) != 0);
-      Serial.print("ACK;R2;"); Serial.println(atoi(args));
+      Serial3.print("ACK;R2;"); Serial3.println(atoi(args));
     } else if (strcmp(cmdType, "TIME") == 0) {
       char* i1 = strchr(args, ';');
       if (i1) {
         *i1 = '\0'; clockH = atoi(args); clockM = atoi(i1 + 1); clockLastSync = millis();
-        Serial.print("ACK;TIME;"); Serial.print(pad2(clockH)); Serial.print(":"); Serial.println(pad2(clockM));
-      } else { Serial.println("ERR;TIME_FORMAT"); }
+        char timeBuf[6];
+        snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", clockH, clockM);
+        Serial3.print("ACK;TIME;"); Serial3.println(timeBuf);
+      } else { Serial3.println("ERR;TIME_FORMAT"); }
     } else if (strcmp(cmdType, "ROT") == 0) {
       remoteRot = atol(args); lastLCD = 0;
     } else if (strcmp(cmdType, "BTN") == 0) {
@@ -203,14 +213,14 @@ void processCommand(const char* cmd) {
     } else if (strcmp(cmdType, "RST") == 0) {
       remoteRot = 0; remoteEvt = 'Z'; remoteEvtAt = millis(); lastLCD = 0;
     } else {
-      Serial.print("ERR;UNKNOWN_CMD:"); Serial.println(cmdType);
+      Serial3.print("ERR;UNKNOWN_CMD:"); Serial3.println(cmdType);
     }
   } else {
     if (strcmp(cmdType, "HB") == 0) {
       if (!systemSafe) systemSafe = true;
-      Serial.println("ACK;HB");
+      Serial3.println("ACK;HB");
     } else {
-      Serial.print("ERR;UNKNOWN_CMD:"); Serial.println(cmdType);
+      Serial3.print("ERR;UNKNOWN_CMD:"); Serial3.println(cmdType);
     }
   }
 }
@@ -220,8 +230,8 @@ void reportSensors() {
   int bumpF = !digitalRead(PIN_BUMP_F), bumpR = !digitalRead(PIN_BUMP_R);
   int tiltL = !digitalRead(PIN_TILT_L), tiltR = !digitalRead(PIN_TILT_R);
   long batt_mv = (long)analogRead(PIN_BATT) * 5000L / 1023L * BATT_DIV_RATIO;
-  Serial.print("SENS;"); Serial.print(bumpF); Serial.print(";"); Serial.print(bumpR); Serial.print(";");
-  Serial.print(tiltL); Serial.print(";"); Serial.print(tiltR); Serial.print(";"); Serial.println(batt_mv);
+  Serial3.print("SENS;"); Serial3.print(bumpF); Serial3.print(";"); Serial3.print(bumpR); Serial3.print(";");
+  Serial3.print(tiltL); Serial3.print(";"); Serial3.print(tiltR); Serial3.print(";"); Serial3.println(batt_mv);
   if (tiltL || tiltR) emergencyStop("TILT");
 }
 
@@ -238,6 +248,9 @@ void initESC() {
 }
 
 void setup() {
+  // Инициализация safeReason
+  safeReason[0] = '\0';
+
   // Пины
   pinMode(PIN_BLADE, OUTPUT); pinMode(PIN_BUMP_F, INPUT_PULLUP); pinMode(PIN_BUMP_R, INPUT_PULLUP);
   pinMode(PIN_TILT_L, INPUT_PULLUP); pinMode(PIN_TILT_R, INPUT_PULLUP); pinMode(PIN_BATT, INPUT);
@@ -256,10 +269,11 @@ void setup() {
   lcd.setCursor(0, 0); lcd.print("Viking MI 632 P");
   lcd.setCursor(0, 1); lcd.print("Boot Timer1");
 
-  // UART
-  Serial.begin(115200);
+  // UART — Serial3 на пинах 14(TX3) / 15(RX3)
+  // ВНИМАНИЕ: Serial (пины 0/1) неисправен — RX0 выгорел
+  Serial3.begin(115200);
   lastHB = millis();
-  Serial.println("ACK;BOOT BLDC");
+  Serial3.println("ACK;BOOT BLDC");
 
   // 2 сек для калибровки ESC
   delay(2000);
@@ -268,9 +282,9 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Чтение UART — БЕЗ String
-  while (Serial.available()) {
-    char c = (char)Serial.read();
+  // Чтение UART — Serial3 (пины 14/15), БЕЗ String
+  while (Serial3.available()) {
+    char c = (char)Serial3.read();
     if (c == '\n') {
       if (rxLen > 0 && rxBuf[rxLen - 1] == '\r') rxBuf[--rxLen] = '\0';
       processCommand(rxBuf);
