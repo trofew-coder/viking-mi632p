@@ -5,7 +5,8 @@ from typing import Optional, Callable
 from flask import Flask, render_template_string, jsonify, request
 
 # Порт по by-path — стабилен (не ttyUSB0, который может меняться)
-SERIAL_PORT = "/dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0-port0"
+# ttyUSB1 = Uno как USB-UART мост от Mega Serial3 (пины 14/15)
+SERIAL_PORT = "/dev/ttyUSB1"
 BAUD_RATE = 115200
 HEARTBEAT_INTERVAL_S = 0.15
 RECONNECT_DELAY_S = 1.0
