@@ -43,10 +43,10 @@ class RobotLink:
         self.safe_reason = ""
         self.current_speed_l = 0
         self.current_speed_r = 0
-        self.blade_on = False
+        self._bladeOn = False  # ФИКС: флаг отделён от метода blade_on()
         self.clock_h = 0
         self.clock_m = 0
-    
+
     def connect(self) -> bool:
         try:
             self.serial = serial.Serial(port=self.port, baudrate=self.baud, timeout=0.1, write_timeout=0.5)
@@ -57,13 +57,13 @@ class RobotLink:
         except serial.SerialException as e:
             log.warning(f"Не удалось открыть {self.port}: {e}")
             return False
-    
+
     def disconnect(self):
         self._running = False
         if self.serial and self.serial.is_open:
             try: self.serial.close()
             except Exception: pass
-    
+
     def _ensure_connected(self) -> bool:
         if self.serial and self.serial.is_open:
             return True
@@ -73,7 +73,7 @@ class RobotLink:
             if self.connect(): return True
             time.sleep(RECONNECT_DELAY_S)
         return False
-    
+
     def _send_raw(self, line: str) -> bool:
         with self._lock:
             if not self._ensure_connected(): return False
@@ -84,29 +84,34 @@ class RobotLink:
                 log.error(f"Ошибка записи: {e}")
                 self.serial.close()
                 return False
-    
+
     def drive(self, speed_left: int, speed_right: int) -> bool:
         self.current_speed_l = speed_left
         self.current_speed_r = speed_right
         return self._send_raw(f"DRV;{max(-255, min(255, int(speed_left)))};{max(-255, min(255, int(speed_right)))}")
     def stop(self) -> bool: return self.drive(0, 0)
-    def blade_on(self) -> bool:
-        self.blade_on = True
-        return self._send_raw("BLD;1")
-    def blade_off(self) -> bool:
-        self.blade_on = False
-        return self._send_raw("BLD;0")
+
+    def set_blade(self, on: bool) -> bool:
+        self._bladeOn = on
+        return self._send_raw(f"BLD;{1 if on else 0}")
+    def blade_on(self) -> bool: return self.set_blade(True)
+    def blade_off(self) -> bool: return self.set_blade(False)
+
     def servo1(self, angle: int) -> bool: return self._send_raw(f"S1;{angle}")
     def servo2(self, angle: int) -> bool: return self._send_raw(f"S2;{angle}")
     def relay1(self, on: bool) -> bool: return self._send_raw(f"R1;{1 if on else 0}")
     def relay2(self, on: bool) -> bool: return self._send_raw(f"R2;{1 if on else 0}")
-    
+
+    def esc(self, us_left: int, us_right: int) -> bool:
+        """Ручная калибровка ESC: us_left, us_right в диапазоне 1000-2000"""
+        return self._send_raw(f"ESC;{us_left};{us_right}")
+
     def _send_time(self):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         now_msk = now_utc + datetime.timedelta(hours=TIMEZONE_OFFSET_HOURS)
         cmd = f"TIME;{now_msk.hour:02d};{now_msk.minute:02d}"
         self._send_raw(cmd)
-    
+
     def _parse_line(self, line: str):
         parts = line.split(";")
         if not parts: return
@@ -129,7 +134,7 @@ class RobotLink:
             if self._on_safety: self._on_safety(reason)
         elif cmd == "ERR":
             log.error(f"Arduino error: {line}")
-    
+
     def _rx_loop(self):
         while self._running:
             if not self._ensure_connected():
@@ -146,17 +151,17 @@ class RobotLink:
                 log.warning("Serial разорван при чтении")
                 try: self.serial.close()
                 except Exception: pass
-    
+
     def _heartbeat_loop(self):
         while self._running:
             self._send_raw("HB")
             time.sleep(HEARTBEAT_INTERVAL_S)
-    
+
     def _time_loop(self):
         while self._running:
             self._send_time()
             time.sleep(TIME_SYNC_INTERVAL_S)
-    
+
     def start(self):
         if not self.connect(): raise RuntimeError("Не удалось подключиться к Arduino")
         self._running = True
@@ -167,14 +172,14 @@ class RobotLink:
         self._hb_thread.start()
         self._time_thread.start()
         log.info("Связь с Arduino запущена (heartbeat + rx + time)")
-    
+
     def stop_all(self):
         self._running = False
         self.blade_off()
         self.stop()
         time.sleep(0.3)
         self.disconnect()
-    
+
     def on_sensors(self, cb): self._on_sensors = cb
     def on_safety(self, cb): self._on_safety = cb
 
@@ -220,8 +225,11 @@ body { background: #131519; color: #e8eaed; font-family: 'Segoe UI', Arial, sans
 .btn-off { background: #b71c1c; color: #ffcdd2; }
 .btn-out { background: #1c1f24; border: 1px solid #4fc3f7; color: #4fc3f7; }
 .btn-out.active { background: #0d47a1; color: #fff; }
-.servo-row { margin-bottom: 8px; }
-.servo-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 2px; }
+.esc-block { margin-bottom: 10px; }
+.esc-row { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.esc-input { width: 60px; background: #131519; border: 1px solid #2a2e35; color: #4fc3f7; border-radius: 4px; padding: 4px; text-align: center; font-size: 14px; }
+.esc-label { font-size: 12px; color: #90a4ae; min-width: 60px; }
+.esc-apply { background: #0d47a1; color: #fff; border: none; border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .remotebar { background: #1c1f24; border: 1px solid #2a2e35; border-radius: 8px; padding: 6px 12px; display: flex; align-items: center; gap: 18px; font-size: 14px; }
 .remotebar .rot { font-size: 22px; font-weight: 800; color: #ffb74d; margin-left: 4px; }
 .remotebar .dim { color: #90a4ae; }
@@ -265,6 +273,17 @@ body { background: #131519; color: #e8eaed; font-family: 'Segoe UI', Arial, sans
           <button class="btn btn-on" onclick="bladeOn()">ВКЛ</button>
           <button class="btn btn-off" onclick="bladeOff()">ВЫКЛ</button>
         </div>
+      </div>
+      <div class="esc-block">
+        <h3>⚡ ESC калибровка</h3>
+        <div class="esc-row">
+          <span class="esc-label">Левый:</span>
+          <input type="number" class="esc-input" id="escL" value="1500" min="1000" max="2000">
+          <input type="number" class="esc-input" id="escR" value="1500" min="1000" max="2000">
+          <span class="esc-label">Правый:</span>
+          <button class="esc-apply" onclick="applyESC()">Применить</button>
+        </div>
+        <div style="font-size:11px;color:#90a4ae;">Нейтраль=1500, макс назад=1000, макс вперёд=2000</div>
       </div>
       <div class="aux-block">
         <h3>🛠 Сервы</h3>
@@ -313,6 +332,11 @@ function stopMotors() {
 }
 function bladeOn() { fetch('/api/blade/on'); }
 function bladeOff() { fetch('/api/blade/off'); }
+function applyESC() {
+  let l = document.getElementById('escL').value;
+  let r = document.getElementById('escR').value;
+  fetch('/api/esc?l=' + l + '&r=' + r);
+}
 function updateServo1() {
   let val = document.getElementById('servo1Slider').value;
   document.getElementById('servo1Val').innerText = val;
@@ -393,7 +417,7 @@ def status():
         'clock': f"{link.clock_h:02d}:{link.clock_m:02d}",
         'speed_l': link.current_speed_l,
         'speed_r': link.current_speed_r,
-        'blade_on': link.blade_on
+        'blade_on': link._bladeOn  # ФИКС: читаем приватный флаг
     })
 
 @app.route('/api/drive')
@@ -440,6 +464,13 @@ def relay1():
 def relay2():
     on = request.args.get('on', 'false').lower() == 'true'
     link.relay2(on)
+    return jsonify({'ok': True})
+
+@app.route('/api/esc')
+def esc():
+    l = int(request.args.get('l', 1500))
+    r = int(request.args.get('r', 1500))
+    link.esc(l, r)
     return jsonify({'ok': True})
 
 remote_state = {'rot': 0, 'event': 'NONE', 'last_at': 0.0, 'clicks': 0}
