@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import serial, threading, time, logging, datetime
+"""web_control.py — управление Viking MI 632 P через Flask + прямой UART /dev/ttyAMA0"""
+import serial, threading, time, logging, datetime, os
 from dataclasses import dataclass, asdict
 from typing import Optional, Callable
 from flask import Flask, render_template_string, jsonify, request
@@ -8,10 +9,12 @@ from flask import Flask, render_template_string, jsonify, request
 # Mega TX3 (5В) → делитель 1к+2к → Pi GPIO15 (RX, 3.3В)
 SERIAL_PORT = "/dev/ttyAMA0"
 BAUD_RATE = 115200
-HEARTBEAT_INTERVAL_S = 0.25 # 250ms — приоритет HB
+HEARTBEAT_INTERVAL_S = 0.25  # 250ms — приоритет HB
 RECONNECT_DELAY_S = 1.0
 TIME_SYNC_INTERVAL_S = 60
 TIMEZONE_OFFSET_HOURS = 3
+SERIAL_INIT_DELAY_S = 2.2  # задержка после открытия Serial для загрузчика Arduino
+
 
 def _xor_checksum(text: str) -> str:
     """XOR всех байтов строки, вернуть 2 hex-символа"""
@@ -20,11 +23,10 @@ def _xor_checksum(text: str) -> str:
         cs ^= b
     return format(cs, '02X')
 
-# FIX: DS_DTR=False чтобы тесты не перезагружали Mega (CH340 дергает DTR)
-SERIAL_INIT_DELAY_S = 2.2  # задержка после открытия Serial для загрузчика Arduino
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("RobotLink")
+
 
 @dataclass
 class Sensors:
@@ -33,11 +35,14 @@ class Sensors:
     tilt_left: bool = False
     tilt_right: bool = False
     battery_mv: int = 0
+
     @property
     def battery_v(self) -> float:
         return self.battery_mv / 1000.0
+
     def __str__(self):
         return f"Bump[F:{self.bump_front} R:{self.bump_rear}] Tilt[L:{self.tilt_left} R:{self.tilt_right}] BAT:{self.battery_v:.1f}V"
+
 
 class RobotLink:
     def __init__(self, port: str = SERIAL_PORT, baud: int = BAUD_RATE):
@@ -48,28 +53,25 @@ class RobotLink:
         self._hb_thread: Optional[threading.Thread] = None
         self._rx_thread: Optional[threading.Thread] = None
         self._time_thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
+        self._write_lock = threading.Lock()  # Только на write!
         self._on_sensors: Optional[Callable[[Sensors], None]] = None
         self._on_safety: Optional[Callable[[str], None]] = None
         self.system_safe = True
         self.safe_reason = ""
         self.current_speed_l = 0
         self.current_speed_r = 0
-        self._bladeOn = False  # ФИКС: флаг отделён от метода blade_on()
+        self._bladeOn = False
         self.clock_h = 0
         self.clock_m = 0
 
     def connect(self) -> bool:
         try:
-            # dsrdtr=False — не сбрасывать Mega при открытии порта (CH340 DTR reset)
+            # ttyAMA0: timeout=0.05, БЕЗ reset_input_buffer() — бросает OSError
             self.serial = serial.Serial(
                 port=self.port, baudrate=self.baud, timeout=0.05, write_timeout=0.1,
                 dsrdtr=False
             )
-            # Задержка для CH340/Arduino: при открытии порта DTR reset → Mega перезагружается
-            # Первые 2 секунды загрузчик глушит UART, нужно ждать
             time.sleep(SERIAL_INIT_DELAY_S)
-            self.serial.reset_input_buffer()
             log.info(f"Serial открыт: {self.port} @ {self.baud}")
             return True
         except serial.SerialException as e:
@@ -94,16 +96,17 @@ class RobotLink:
 
     def _send_raw(self, line: str) -> bool:
         """Отправить команду в протоколе v3: $CMD*CS\n"""
-        if not self._ensure_connected(): return False
-        try:
-            frame = f"${line}*{_xor_checksum(line)}\n"
-            self.serial.write(frame.encode("utf-8"))
-            return True
-        except serial.SerialException as e:
-            log.error(f"Ошибка записи: {e}")
-            try: self.serial.close()
-            except Exception: pass
-            return False
+        with self._write_lock:
+            if not self._ensure_connected(): return False
+            try:
+                frame = f"${line}*{_xor_checksum(line)}\n"
+                self.serial.write(frame.encode("utf-8"))
+                return True
+            except serial.SerialException as e:
+                log.error(f"Ошибка записи: {e}")
+                try: self.serial.close()
+                except Exception: pass
+                return False
 
     def drive(self, speed_left: int, speed_right: int) -> bool:
         self.current_speed_l = speed_left
@@ -117,66 +120,60 @@ class RobotLink:
     def blade_on(self) -> bool: return self.set_blade(True)
     def blade_off(self) -> bool: return self.set_blade(False)
 
-    def servo1(self, angle: int) -> bool: return self._send_raw(f"S1;{angle}")
-    def servo2(self, angle: int) -> bool: return self._send_raw(f"S2;{angle}")
-    def relay1(self, on: bool) -> bool: return self._send_raw(f"R1;{1 if on else 0}")
-    def relay2(self, on: bool) -> bool: return self._send_raw(f"R2;{1 if on else 0}")
+    def on_sensors(self, cb): self._on_sensors = cb
+    def on_safety(self, cb): self._on_safety = cb
 
-    def esc(self, us_left: int, us_right: int) -> bool:
-        """Ручная калибровка ESC: us_left, us_right в диапазоне 1000-2000"""
-        return self._send_raw(f"ESC;{us_left};{us_right}")
-
-    def _send_time(self):
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        now_msk = now_utc + datetime.timedelta(hours=TIMEZONE_OFFSET_HOURS)
-        cmd = f"TIME;{now_msk.hour:02d};{now_msk.minute:02d}"
-        self._send_raw(cmd)
+    def emergency_stop(self, reason: str):
+        log.warning(f"АВАРИЙНЫЙ СТОП на Arduino: {reason}")
+        if self._on_safety: self._on_safety(reason)
+        self.system_safe = False
+        self.safe_reason = reason
+        self.stop()
+        self.blade_off()
 
     def _parse_line(self, line: str):
-        parts = line.split(";")
-        if not parts: return
-        cmd = parts[0]
-        if cmd == "SENS" and len(parts) >= 6:
-            self.sensors.bump_front = parts[1] == "1"
-            self.sensors.bump_rear = parts[2] == "1"
-            self.sensors.tilt_left = parts[3] == "1"
-            self.sensors.tilt_right = parts[4] == "1"
-            try: self.sensors.battery_mv = int(parts[5])
-            except ValueError: pass
-            if self._on_sensors: self._on_sensors(self.sensors)
-        elif cmd == "ACK":
-            log.debug(f"ACK: {parts[1] if len(parts) > 1 else '?'}")
-        elif cmd == "SAFE":
-            reason = parts[1] if len(parts) > 1 else "unknown"
-            self.system_safe = False
-            self.safe_reason = reason
-            log.warning(f"АВАРИЙНЫЙ СТОП на Arduino: {reason}")
-            if self._on_safety: self._on_safety(reason)
-        elif cmd == "ERR":
-            log.error(f"Arduino error: {line}")
+        # Протокол v3: ответ Mega без $ и *CS (только команды с маркером)
+        cmd = line.strip()
+        if not cmd: return
+
+        if cmd.startswith("SENS;"):
+            parts = cmd.split(';')
+            if len(parts) == 6:
+                self.sensors.bump_front = int(parts[1]) == 1
+                self.sensors.bump_rear = int(parts[2]) == 1
+                self.sensors.tilt_left = int(parts[3]) == 1
+                self.sensors.tilt_right = int(parts[4]) == 1
+                self.sensors.battery_mv = int(parts[5])
+                if self._on_sensors: self._on_sensors(self.sensors)
+        elif cmd.startswith("SAFE;"):
+            parts = cmd.split(';')
+            reason = parts[1] if len(parts) > 1 else "UNKNOWN"
+            self.emergency_stop(reason)
+        elif cmd.startswith("ACK;"):
+            pass  # Подтверждение команды
 
     def _rx_loop(self):
+        """Чтение UART без Lock — readline с timeout=0.05"""
         while self._running:
-            if not self._ensure_connected():
-                time.sleep(RECONNECT_DELAY_S)
-                continue
             try:
-                # Читаем чанками с маленьким таймаутом — не блокировать HB
-                if self.serial.in_waiting > 0:
-                    raw = self.serial.read(self.serial.in_waiting)
-                    text = raw.decode("utf-8", errors="ignore").strip()
-                    for line in text.split('\n'):
-                        if line: self._parse_line(line)
-                else: time.sleep(0.01)
-            except serial.SerialException:
-                log.warning("Serial разорван при чтении")
-                try: self.serial.close()
-                except Exception: pass
+                if self.serial and self.serial.is_open:
+                    line = self.serial.readline()
+                    if line:
+                        text = line.decode("utf-8", errors="ignore").strip()
+                        if text: self._parse_line(text)
+                else:
+                    time.sleep(0.02)
+            except Exception:
+                time.sleep(0.02)
 
     def _heartbeat_loop(self):
         while self._running:
             self._send_raw("HB")
             time.sleep(HEARTBEAT_INTERVAL_S)
+
+    def _send_time(self):
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=TIMEZONE_OFFSET_HOURS)))
+        self._send_raw(f"TIME;{now.hour:02d};{now.minute:02d}")
 
     def _time_loop(self):
         while self._running:
@@ -201,12 +198,66 @@ class RobotLink:
         time.sleep(0.3)
         self.disconnect()
 
-    def on_sensors(self, cb): self._on_sensors = cb
-    def on_safety(self, cb): self._on_safety = cb
 
+# --- Flask ---
 app = Flask(__name__)
 link = RobotLink()
+remote_state = {"rot": 0, "event": "", "clicks": 0, "last_at": None, "age": -1}
 
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route('/api/status')
+def status():
+    return jsonify({**asdict(link.sensors),
+                    "blade_on": link._bladeOn,
+                    "system_safe": link.system_safe,
+                    "safe_reason": link.safe_reason,
+                    "speed_l": link.current_speed_l,
+                    "speed_r": link.current_speed_r,
+                    "clock": f"{link.clock_h:02d}:{link.clock_m:02d}"})
+
+
+@app.route('/api/drive', methods=['POST'])
+def drive_post():
+    d = request.get_json()
+    ok = link.drive(d.get('speed_l', 0), d.get('speed_r', 0))
+    return jsonify({"ok": ok})
+
+
+@app.route('/api/blade', methods=['POST'])
+def blade_post():
+    d = request.get_json()
+    on = d.get('on', False)
+    if on: ok = link.blade_on()
+    else: ok = link.blade_off()
+    return jsonify({"ok": ok})
+
+
+@app.route('/remote', methods=['POST'])
+def remote_post():
+    d = request.get_json()
+    rot = d.get('rot', 0)
+    event = d.get('event', 'ROTATE')
+    remote_state['rot'] = rot
+    remote_state['event'] = event
+    remote_state['last_at'] = time.time()
+    if event == 'CLICK': remote_state['clicks'] += 1
+    link._send_raw(f"ROT;{rot}" if event == "ROTATE" else event)
+    return jsonify({"ok": True})
+
+
+@app.route('/remote/state')
+def remote_state_get():
+    age = (time.time() - remote_state['last_at']) if remote_state['last_at'] else -1
+    return jsonify({"rot": remote_state['rot'], "event": remote_state['event'],
+                    "clicks": remote_state['clicks'], "last_at": remote_state['last_at'], 'age': age})
+
+
+# --- HTML ---
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -218,309 +269,81 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 html, body { height: 100%; overflow: hidden; }
 body { background: #131519; color: #e8eaed; font-family: 'Segoe UI', Arial, sans-serif; }
 .app { display: grid; grid-template-rows: auto 1fr auto; gap: 6px; height: 100vh; padding: 6px; }
-.topbar { display: flex; align-items: center; gap: 14px; background: #1c1f24; border: 1px solid #2a2e35; border-radius: 8px; padding: 8px 12px; }
-.brand { font-size: 20px; font-weight: 700; letter-spacing: 1px; white-space: nowrap; }
-.brand .hl { color: #4fc3f7; }
-#statusBox { flex: 1; }
-.status-ready, .status-safe { padding: 6px 14px; border-radius: 6px; font-weight: 700; font-size: 15px; letter-spacing: 1px; }
-.status-ready { background: #1b5e20; color: #b9f6ca; }
-.status-safe { background: #b71c1c; color: #ffcdd2; }
-.top-small { font-size: 14px; color: #90a4ae; white-space: nowrap; }
-.main { display: grid; grid-template-columns: 290px 1fr 350px; gap: 8px; min-height: 0; }
-.panel { background: #1c1f24; border: 1px solid #2a2e35; border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; }
-.panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #7c8794; border-bottom: 1px solid #2a2e35; padding-bottom: 4px; margin-bottom: 8px; }
-.tele-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; border-bottom: 1px dashed #282c33; }
-.tele-row .k { color: #9aa4af; }
-.tele-row .v { font-weight: 600; }
-.motor-block { margin-bottom: 10px; }
-.motor-head { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 2px; }
-.motor-head b { color: #4fc3f7; }
-.speed-slider { width: 100%; accent-color: #4fc3f7; height: 26px; cursor: pointer; }
-.stop-wrap { display: flex; gap: 8px; margin-top: 4px; }
-.btn-stop { flex: 1; background: #c62828; color: #fff; border: none; border-radius: 8px; font-size: 22px; font-weight: 800; padding: 12px; cursor: pointer; letter-spacing: 2px; }
-.btn-stop:hover { background: #b71c1c; }
-.aux-block { margin-bottom: 10px; }
-.btn-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.btn { border-radius: 6px; border: none; font-size: 14px; font-weight: 700; padding: 8px; cursor: pointer; }
-.btn-on { background: #1b5e20; color: #b9f6ca; }
-.btn-off { background: #b71c1c; color: #ffcdd2; }
-.btn-out { background: #1c1f24; border: 1px solid #4fc3f7; color: #4fc3f7; }
-.btn-out.active { background: #0d47a1; color: #fff; }
-.esc-block { margin-bottom: 10px; }
-.esc-row { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
-.esc-input { width: 60px; background: #131519; border: 1px solid #2a2e35; color: #4fc3f7; border-radius: 4px; padding: 4px; text-align: center; font-size: 14px; }
-.esc-label { font-size: 12px; color: #90a4ae; min-width: 60px; }
-.esc-apply { background: #0d47a1; color: #fff; border: none; border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
-.remotebar { background: #1c1f24; border: 1px solid #2a2e35; border-radius: 8px; padding: 6px 12px; display: flex; align-items: center; gap: 18px; font-size: 14px; }
-.remotebar .rot { font-size: 22px; font-weight: 800; color: #ffb74d; margin-left: 4px; }
-.remotebar .dim { color: #90a4ae; }
+.header { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.dash, .log { background: #1e2126; border-radius: 10px; padding: 10px 12px; overflow: auto; }
+.dash { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.dash-item { font-size: 14px; }
+.dash-item .label { font-size: 11px; color: #8b8f96; text-transform: uppercase; }
+.dash-item .val { font-size: 20px; font-weight: 600; margin: 2px 0; }
+.ok { color: #2ecc71; } .bad { color: #e74c3c; }
+.joy { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; }
+.joy-btn { background: #2c2f36; border: none; color: #e8eaed; border-radius: 8px; padding: 10px; font-size: 18px; cursor: pointer; }
+.joy-btn:active { background: #3d4048; }
+.joy-range { width: 100%; accent-color: #3498db; }
+.log { font-family: monospace; font-size: 12px; color: #8b8f96; }
+.joy-center { text-align: center; padding: 4px; font-size: 12px; color: #8b8f96; }
+.joy-slider-group { display: flex; flex-direction: column; gap: 4px; }
+.joy-slider-group label { font-size: 10px; color: #8b8f96; }
 </style>
 </head>
 <body>
 <div class="app">
-  <div class="topbar">
-    <div class="brand">🤖 Viking <span class="hl">MI 632 P</span></div>
-    <div id="statusBox"><div class="status-ready" id="statusText">STATUS: READY</div></div>
-    <div class="top-small" id="clockTop">🕐 <span id="clock">--:--</span></div>
-    <div class="top-small">🎮 Мост 1920x1080</div>
+  <div class="header">
+    <div class="dash" id="dash"></div>
+    <div class="log" id="log"></div>
   </div>
-  <div class="main">
-    <div class="panel">
-      <h3>📊 Телеметрия</h3>
-      <div class="tele-row"><span class="k">Батарея</span><span class="v" id="battery">--</span><span class="v">V</span></div>
-      <div class="tele-row"><span class="k">Бамперы</span><span class="v">Перед: <span id="bumpFront">0</span> · Зад: <span id="bumpRear">0</span></span></div>
-      <div class="tele-row"><span class="k">Наклон</span><span class="v">Лев: <span id="tiltLeft">0</span> · Прав: <span id="tiltRight">0</span></span></div>
-      <div class="tele-row"><span class="k">Скорости</span><span class="v">L: <span id="speedL">0</span> · R: <span id="speedR">0</span></span></div>
-      <div class="tele-row"><span class="k">Нож</span><span class="v" id="bladeStatus">OFF</span></div>
+  <div class="joy">
+    <button class="joy-btn" onmousedown="sendJoy('up')" onmouseup="sendJoy('stop')" ontouchstart="sendJoy('up')" ontouchend="sendJoy('stop')">▲</button>
+    <div class="joy-slider-group">
+      <label>Газ</label>
+      <input type="range" class="joy-range" id="throttle" min="-100" max="100" value="0">
     </div>
-    <div class="panel">
-      <h3>🎮 Управление моторами</h3>
-      <div class="motor-block">
-        <div class="motor-head"><span>Левый мотор</span><b id="speedLVal">0</b></div>
-        <input type="range" class="speed-slider" id="sliderL" min="-255" max="255" value="0" oninput="updateSpeed()">
-      </div>
-      <div class="motor-block">
-        <div class="motor-head"><span>Правый мотор</span><b id="speedRVal">0</b></div>
-        <input type="range" class="speed-slider" id="sliderR" min="-255" max="255" value="0" oninput="updateSpeed()">
-      </div>
-      <div class="stop-wrap">
-        <button class="btn-stop" onclick="stopMotors()">🛑 СТОП</button>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="aux-block">
-        <h3>🔪 Нож</h3>
-        <div class="btn-pair">
-          <button class="btn btn-on" onclick="bladeOn()">ВКЛ</button>
-          <button class="btn btn-off" onclick="bladeOff()">ВЫКЛ</button>
-        </div>
-      </div>
-      <div class="esc-block">
-        <h3>⚡ ESC калибровка</h3>
-        <div class="esc-row">
-          <span class="esc-label">Левый:</span>
-          <input type="number" class="esc-input" id="escL" value="1500" min="1000" max="2000">
-          <input type="number" class="esc-input" id="escR" value="1500" min="1000" max="2000">
-          <span class="esc-label">Правый:</span>
-          <button class="esc-apply" onclick="applyESC()">Применить</button>
-        </div>
-        <div style="font-size:11px;color:#90a4ae;">Нейтраль=1500, макс назад=1000, макс вперёд=2000</div>
-      </div>
-      <div class="aux-block">
-        <h3>🛠 Сервы</h3>
-        <div class="servo-row">
-          <div class="servo-head"><span>Серва 1</span><b id="servo1Val">90</b>°</div>
-          <input type="range" class="speed-slider" id="servo1Slider" min="0" max="180" value="90" oninput="updateServo1()">
-        </div>
-        <div class="servo-row">
-          <div class="servo-head"><span>Серва 2</span><b id="servo2Val">90</b>°</div>
-          <input type="range" class="speed-slider" id="servo2Slider" min="0" max="180" value="90" oninput="updateServo2()">
-        </div>
-      </div>
-      <div class="aux-block">
-        <h3>🔌 Реле</h3>
-        <div class="btn-pair">
-          <button class="btn btn-out" id="relay1Btn" onclick="toggleRelay1()">Реле 1: ВЫКЛ</button>
-          <button class="btn btn-out" id="relay2Btn" onclick="toggleRelay2()">Реле 2: ВЫКЛ</button>
-        </div>
-      </div>
-    </div>
+    <button class="joy-btn" onmousedown="sendJoy('down')" onmouseup="sendJoy('stop')" ontouchstart="sendJoy('down')" ontouchend="sendJoy('stop')">▼</button>
   </div>
-  <div class="remotebar">
-    <span>Внешний пульт (D1 mini + энкодер)</span>
-    <span>ROT: <span class="rot" id="remoteRot">0</span></span>
-    <span class="dim">Событие: <span id="remoteEvent">-</span></span>
-    <span class="dim">Нажатий: <span id="remoteClicks">0</span></span>
-    <span class="dim" id="remoteAge">пульт не на связи</span>
+  <div class="joy" style="grid-template-columns: auto 1fr auto;">
+    <button class="joy-btn" onmousedown="sendJoy('left')" onmouseup="sendJoy('stop')" ontouchstart="sendJoy('left')" ontouchend="sendJoy('stop')">◀</button>
+    <div class="joy-center" id="centerLabel">STOP</div>
+    <button class="joy-btn" onmousedown="sendJoy('right')" onmouseup="sendJoy('stop')" ontouchstart="sendJoy('right')" ontouchend="sendJoy('stop')">▶</button>
   </div>
 </div>
+
 <script>
-let relay1State = false;
-let relay2State = false;
-function updateSpeed() {
-  let l = document.getElementById('sliderL').value;
-  let r = document.getElementById('sliderR').value;
-  document.getElementById('speedLVal').innerText = l;
-  document.getElementById('speedRVal').innerText = r;
-  fetch('/api/drive?l=' + l + '&r=' + r);
-}
-function stopMotors() {
-  document.getElementById('sliderL').value = 0;
-  document.getElementById('sliderR').value = 0;
-  document.getElementById('speedLVal').innerText = 0;
-  document.getElementById('speedRVal').innerText = 0;
-  fetch('/api/stop');
-}
-function bladeOn() { fetch('/api/blade/on'); }
-function bladeOff() { fetch('/api/blade/off'); }
-function applyESC() {
-  let l = document.getElementById('escL').value;
-  let r = document.getElementById('escR').value;
-  fetch('/api/esc?l=' + l + '&r=' + r);
-}
-function updateServo1() {
-  let val = document.getElementById('servo1Slider').value;
-  document.getElementById('servo1Val').innerText = val;
-  fetch('/api/servo1?angle=' + val);
-}
-function updateServo2() {
-  let val = document.getElementById('servo2Slider').value;
-  document.getElementById('servo2Val').innerText = val;
-  fetch('/api/servo2?angle=' + val);
-}
-function toggleRelay1() {
-  relay1State = !relay1State;
-  let b = document.getElementById('relay1Btn');
-  b.innerText = 'Реле 1: ' + (relay1State ? 'ВКЛ' : 'ВЫКЛ');
-  b.className = 'btn ' + (relay1State ? 'btn-out active' : 'btn-out');
-  fetch('/api/relay1?on=' + relay1State);
-}
-function toggleRelay2() {
-  relay2State = !relay2State;
-  let b = document.getElementById('relay2Btn');
-  b.innerText = 'Реле 2: ' + (relay2State ? 'ВКЛ' : 'ВЫКЛ');
-  b.className = 'btn ' + (relay2State ? 'btn-out active' : 'btn-out');
-  fetch('/api/relay2?on=' + relay2State);
-}
+const API = '/api';
+let logEntries = [];
 function updateStatus() {
-  fetch('/api/status')
-  .then(r => r.json())
-  .then(data => {
-    let statusText = document.getElementById('statusText');
-    if (data.system_safe) {
-      statusText.className = 'status-ready';
-      statusText.textContent = 'STATUS: READY';
-    } else {
-      statusText.className = 'status-safe';
-      statusText.textContent = 'STATUS: SAFE - ' + data.safe_reason;
-    }
-    document.getElementById('battery').innerText = data.battery_v.toFixed(1);
-    document.getElementById('bumpFront').innerText = data.bump_front ? '1' : '0';
-    document.getElementById('bumpRear').innerText = data.bump_rear ? '1' : '0';
-    document.getElementById('tiltLeft').innerText = data.tilt_left ? '1' : '0';
-    document.getElementById('tiltRight').innerText = data.tilt_right ? '1' : '0';
-    document.getElementById('clock').innerText = data.clock;
-    document.getElementById('speedL').innerText = data.speed_l;
-    document.getElementById('speedR').innerText = data.speed_r;
-    document.getElementById('bladeStatus').innerText = data.blade_on ? 'ON' : 'OFF';
+  fetch(API + '/status').then(r => r.json()).then(d => {
+    const dash = document.getElementById('dash');
+    const safeCls = d.system_safe ? 'ok' : 'bad';
+    dash.innerHTML = `
+      <div class="dash-item"><div class="label">Батарея</div><div class="val">${d.battery_v.toFixed(1)}V</div></div>
+      <div class="dash-item"><div class="label">Статус</div><div class="val ${safeCls}">${d.system_safe ? 'OK' : d.safe_reason}</div></div>
+      <div class="dash-item"><div class="label">Скорость L/R</div><div class="val">${d.speed_l} / ${d.speed_r}</div></div>
+      <div class="dash-item"><div class="label">Нож</div><div class="val">${d.blade_on ? 'ON' : 'OFF'}</div></div>
+    `;
+    const log = document.getElementById('log');
+    logEntries.push(`${d.clock} | ${d.speed_l};${d.speed_r} | ${d.system_safe ? 'OK' : d.safe_reason}`);
+    if (logEntries.length > 20) logEntries.shift();
+    log.innerHTML = logEntries.join('<br>');
+    log.scrollTop = log.scrollHeight;
   });
 }
-setInterval(updateStatus, 1000);
-function updateRemote() {
-  fetch('/remote/state').then(r => r.json()).then(d => {
-    document.getElementById('remoteRot').innerText = d.rot;
-    document.getElementById('remoteEvent').innerText = d.event;
-    document.getElementById('remoteClicks').innerText = d.clicks;
-    document.getElementById('remoteAge').innerText = d.age < 0 ? 'пульт ещё не отвечал' : ('обновлено ' + d.age.toFixed(1) + ' с назад');
-  }).catch(() => {});
+function sendJoy(dir) {
+  const throttle = parseInt(document.getElementById('throttle').value) || 0;
+  let l = 0, r = 0;
+  if (dir === 'up') { l = throttle; r = throttle; }
+  else if (dir === 'down') { l = -throttle; r = -throttle; }
+  else if (dir === 'left') { l = -Math.abs(throttle); r = Math.abs(throttle); }
+  else if (dir === 'right') { l = Math.abs(throttle); r = -Math.abs(throttle); }
+  else { l = 0; r = 0; }
+  document.getElementById('centerLabel').textContent = dir.toUpperCase();
+  fetch(API + '/drive', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({speed_l: l, speed_r: r}) });
 }
-setInterval(updateRemote, 500);
-updateRemote();
+setInterval(updateStatus, 500);
 updateStatus();
 </script>
 </body>
 </html>'''
 
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/api/status')
-def status():
-    return jsonify({
-        'system_safe': link.system_safe,
-        'safe_reason': link.safe_reason,
-        'battery_v': link.sensors.battery_v,
-        'bump_front': link.sensors.bump_front,
-        'bump_rear': link.sensors.bump_rear,
-        'tilt_left': link.sensors.tilt_left,
-        'tilt_right': link.sensors.tilt_right,
-        'clock': f"{link.clock_h:02d}:{link.clock_m:02d}",
-        'speed_l': link.current_speed_l,
-        'speed_r': link.current_speed_r,
-        'blade_on': link._bladeOn  # ФИКС: читаем приватный флаг
-    })
-
-@app.route('/api/drive')
-def drive():
-    l = int(request.args.get('l', 0))
-    r = int(request.args.get('r', 0))
-    link.drive(l, r)
-    return jsonify({'ok': True})
-
-@app.route('/api/stop')
-def stop():
-    link.stop()
-    return jsonify({'ok': True})
-
-@app.route('/api/blade/on')
-def blade_on():
-    link.blade_on()
-    return jsonify({'ok': True})
-
-@app.route('/api/blade/off')
-def blade_off():
-    link.blade_off()
-    return jsonify({'ok': True})
-
-@app.route('/api/servo1')
-def servo1():
-    angle = int(request.args.get('angle', 90))
-    link.servo1(angle)
-    return jsonify({'ok': True})
-
-@app.route('/api/servo2')
-def servo2():
-    angle = int(request.args.get('angle', 90))
-    link.servo2(angle)
-    return jsonify({'ok': True})
-
-@app.route('/api/relay1')
-def relay1():
-    on = request.args.get('on', 'false').lower() == 'true'
-    link.relay1(on)
-    return jsonify({'ok': True})
-
-@app.route('/api/relay2')
-def relay2():
-    on = request.args.get('on', 'false').lower() == 'true'
-    link.relay2(on)
-    return jsonify({'ok': True})
-
-@app.route('/api/esc')
-def esc():
-    l = int(request.args.get('l', 1500))
-    r = int(request.args.get('r', 1500))
-    link.esc(l, r)
-    return jsonify({'ok': True})
-
-remote_state = {'rot': 0, 'event': 'NONE', 'last_at': 0.0, 'clicks': 0}
-
-@app.route('/remote', methods=['POST'])
-def remote_post():
-    data = request.get_json(silent=True) or {}
-    try:
-        rot = int(data.get('rot', 0))
-    except (TypeError, ValueError):
-        rot = 0
-    event = str(data.get('event', 'ROTATE'))[:16]
-    remote_state['rot'] = rot
-    remote_state['event'] = event
-    remote_state['last_at'] = time.time()
-    if event == 'CLICK':
-        remote_state['clicks'] += 1
-        link._send_raw('BTN')
-    elif event == 'LONG_PRESS':
-        link._send_raw('RST')
-    else:
-        link._send_raw('ROT;%d' % rot)
-    return jsonify({'ok': True})
-
-@app.route('/remote/state')
-def remote_state_get():
-    age = (time.time() - remote_state['last_at']) if remote_state['last_at'] else -1
-    return jsonify({'rot': remote_state['rot'], 'event': remote_state['event'],
-                    'clicks': remote_state['clicks'], 'last_at': remote_state['last_at'], 'age': age})
 
 if __name__ == '__main__':
     try:
