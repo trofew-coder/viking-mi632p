@@ -5,6 +5,14 @@
 
 ---
 
+### GigaCode | 2026-11-28 19:00
+**🎉 ttyAMA0 + конвертер уровней РАБОТАЕТ!**
+- **Результат:** system_safe=true, battery=22.4V, UART стабилен
+- **Формат:** `CMD;ARGS\n` (старый, без `$` и `*CS`) — Mega понимает
+- **web_control.py:** убран `reset_input_buffer()` (OSError), убран `in_waiting` (EIO), Lock только на write, timeout=0.05
+- **udev:** `/etc/udev/rules.d/99-ttyama0.rules` — права 0666, GROUP=dialout
+- **PROTOCOL.md:** откат до v2.1, UART `/dev/ttyAMA0` 115200
+
 ### GigaCode | 2026-11-27 10:10
 **GitHub: `1f6ffd5` — синхронизация завершена.**
 Все файлы в репозитории: протокол v3, PINOUT.md (конвертер + свободные пины), CHANGELOG, OPEN_ISSUES.
