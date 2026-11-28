@@ -14,6 +14,7 @@ RECONNECT_DELAY_S = 1.0
 TIME_SYNC_INTERVAL_S = 60
 TIMEZONE_OFFSET_HOURS = 3
 SERIAL_INIT_DELAY_S = 2.2  # задержка после открытия Serial для загрузчика Arduino
+ACK_TIMEOUT_S = 1.0  # таймаут ожидания ACK от Mega
 
 
 def _xor_checksum(text: str) -> str:
@@ -66,9 +67,9 @@ class RobotLink:
 
     def connect(self) -> bool:
         try:
-            # ttyAMA0: timeout=0.05, БЕЗ reset_input_buffer() — бросает OSError
+            # ttyAMA0: timeout=0.5 (не 0.05), БЕЗ reset_input_buffer() — бросает OSError
             self.serial = serial.Serial(
-                port=self.port, baudrate=self.baud, timeout=0.05, write_timeout=0.1,
+                port=self.port, baudrate=self.baud, timeout=0.5, write_timeout=1.0,
                 dsrdtr=False
             )
             time.sleep(SERIAL_INIT_DELAY_S)
@@ -95,14 +96,29 @@ class RobotLink:
         return False
 
     def _send_raw(self, line: str) -> bool:
-        """Отправить команду в протоколе v3: $CMD*CS\n"""
+        """Отправить команду и дождаться ACK от Mega"""
         with self._write_lock:
             if not self._ensure_connected(): return False
             try:
-                frame = f"${line}*{_xor_checksum(line)}\n"
-                self.serial.write(frame.encode("utf-8"))
+                self.serial.write((line + "\n").encode("utf-8"))
+                self.serial.flush()
+                # Ждать ACK в течение ACK_TIMEOUT_S
+                ack_received = False
+                deadline = time.time() + ACK_TIMEOUT_S
+                while time.time() < deadline:
+                    if self.serial.in_waiting > 0:
+                        resp = self.serial.readline()
+                        if resp:
+                            text = resp.decode("utf-8", errors="ignore").strip()
+                            if text.startswith("ACK;"):
+                                ack_received = True
+                                log.debug(f"ACK получен: {text}")
+                                break
+                    time.sleep(0.02)
+                if not ack_received:
+                    log.warning(f"ACK не получен для команды: {line}")
                 return True
-            except serial.SerialException as e:
+            except (serial.SerialException, OSError) as e:
                 log.error(f"Ошибка записи: {e}")
                 try: self.serial.close()
                 except Exception: pass
@@ -153,14 +169,18 @@ class RobotLink:
             pass  # Подтверждение команды
 
     def _rx_loop(self):
-        """Чтение UART без Lock — readline с timeout=0.05"""
+        """Чтение UART без Lock — readline с timeout=0.5, защита от EIO"""
         while self._running:
             try:
                 if self.serial and self.serial.is_open:
-                    line = self.serial.readline()
-                    if line:
-                        text = line.decode("utf-8", errors="ignore").strip()
-                        if text: self._parse_line(text)
+                    try:
+                        if self.serial.in_waiting > 0:
+                            raw = self.serial.readline()
+                            if raw:
+                                text = raw.decode("utf-8", errors="ignore").strip()
+                                if text: self._parse_line(text)
+                    except (OSError, serial.SerialException):
+                        time.sleep(0.02)
                 else:
                     time.sleep(0.02)
             except Exception:
